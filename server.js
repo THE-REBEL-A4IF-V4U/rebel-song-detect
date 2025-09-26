@@ -26,7 +26,9 @@ app.use(express.static(path.join(__dirname, "public")));
 
 // Helper: Safe delete
 function safeUnlink(file) {
-  try { if (file && fs.existsSync(file)) fs.unlinkSync(file); } catch {}
+  try {
+    if (file && fs.existsSync(file)) fs.unlinkSync(file);
+  } catch {}
 }
 
 // Key check
@@ -46,38 +48,61 @@ app.post("/song-detect", upload.single("file"), async (req, res) => {
   try {
     let sourceFile = null;
 
+    // Debug Logs
+    console.log("📩 Incoming request headers:", req.headers);
+    console.log("📩 Incoming body:", req.body);
+    console.log("📩 Incoming file:", req.file);
+
     // Case 1: File Upload
     if (req.file) {
-      console.log("📂 File received:", req.file.originalname, req.file.size + " bytes", req.file.mimetype);
+      console.log(
+        "📂 File received:",
+        req.file.originalname,
+        req.file.size + " bytes",
+        req.file.mimetype
+      );
       sourceFile = req.file.path;
     }
 
     // Case 2: URL Provided
     else if (req.body.url) {
       const mediaUrl = String(req.body.url || "").trim();
-      if (!mediaUrl) return res.status(400).json({ success: false, error: "Empty url" });
+      if (!mediaUrl) {
+        console.log("❌ URL field is empty");
+        return res.status(400).json({ success: false, error: "Empty url" });
+      }
 
       console.log("🌍 URL received:", mediaUrl);
 
       // For YouTube use external API
       let mediaResp;
       if (mediaUrl.includes("youtube.com") || mediaUrl.includes("youtu.be")) {
-        mediaResp = await axios.get("https://nayan-video-downloader.vercel.app/ytdown", {
-          params: { url: mediaUrl }
-        });
+        mediaResp = await axios.get(
+          "https://nayan-video-downloader.vercel.app/ytdown",
+          { params: { url: mediaUrl } }
+        );
       } else {
-        return res.status(400).json({ success: false, error: "Only YouTube supported right now" });
+        return res
+          .status(400)
+          .json({ success: false, error: "Only YouTube supported right now" });
       }
 
       const md = mediaResp.data;
       console.log("🔗 MediaResp keys:", Object.keys(md));
 
       const downloadUrl =
-        md?.data?.audio || md?.data?.video || md?.data?.url ||
-        md?.result?.audio || md?.result?.video || md?.result?.url || null;
+        md?.data?.audio ||
+        md?.data?.video ||
+        md?.data?.url ||
+        md?.result?.audio ||
+        md?.result?.video ||
+        md?.result?.url ||
+        null;
 
       if (!downloadUrl) {
-        return res.status(404).json({ success: false, error: "No downloadable audio/video found" });
+        return res
+          .status(404)
+          .json({ success: false, error: "No downloadable audio/video found" });
       }
 
       console.log("⬇️ Downloading from:", downloadUrl);
@@ -86,28 +111,33 @@ app.post("/song-detect", upload.single("file"), async (req, res) => {
       fs.ensureDirSync(uploadDir);
 
       tempFile = path.join(uploadDir, `song_${Date.now()}.mp3`);
-      const resp = await axios.get(downloadUrl, { responseType: "arraybuffer", timeout: 60_000 });
+      const resp = await axios.get(downloadUrl, {
+        responseType: "arraybuffer",
+        timeout: 60_000,
+      });
       fs.writeFileSync(tempFile, Buffer.from(resp.data));
       sourceFile = tempFile;
     }
 
     // Nothing provided
     else {
-      return res.status(400).json({ success: false, error: "Upload a file or provide url in 'url' field." });
+      console.log("❌ No file or url found in request.");
+      return res.status(400).json({
+        success: false,
+        error: "Upload a file or provide url in 'url' field.",
+      });
     }
-// File Size Safety
-const stat = fs.statSync(sourceFile);
-console.log("📏 File size:", stat.size, "bytes");
 
-// ✅ এখন 100MB limit
-if (stat.size > 100 * 1024 * 1024) {
-  safeUnlink(tempFile);
-  return res.status(413).json({
-    success: false,
-    error: "File too large (limit 100MB)"
-  });
-}
-
+    // File Size Safety (100MB)
+    const stat = fs.statSync(sourceFile);
+    console.log("📏 File size:", stat.size, "bytes");
+    if (stat.size > 100 * 1024 * 1024) {
+      safeUnlink(tempFile);
+      return res.status(413).json({
+        success: false,
+        error: "File too large (limit 100MB)",
+      });
+    }
 
     // Convert to Base64
     const audioBase64 = fs.readFileSync(sourceFile, { encoding: "base64" });
@@ -116,7 +146,9 @@ if (stat.size > 100 * 1024 * 1024) {
     // RAPIDAPI check
     if (!RAPIDAPI_KEY) {
       safeUnlink(tempFile);
-      return res.status(500).json({ success: false, error: "RAPIDAPI_KEY not configured" });
+      return res
+        .status(500)
+        .json({ success: false, error: "RAPIDAPI_KEY not configured" });
     }
 
     // Call Shazam API
@@ -127,10 +159,10 @@ if (stat.size > 100 * 1024 * 1024) {
       headers: {
         "content-type": "application/json",
         "X-RapidAPI-Key": RAPIDAPI_KEY,
-        "X-RapidAPI-Host": "shazam-core.p.rapidapi.com"
+        "X-RapidAPI-Host": "shazam-core.p.rapidapi.com",
       },
       data: { audio: audioBase64 },
-      timeout: 60_000
+      timeout: 60_000,
     });
 
     safeUnlink(tempFile);
@@ -140,7 +172,9 @@ if (stat.size > 100 * 1024 * 1024) {
   } catch (err) {
     safeUnlink(tempFile);
     console.error("❌ Song detect error:", err.response?.data || err.message);
-    return res.status(500).json({ success: false, error: err.response?.data || err.message });
+    return res
+      .status(500)
+      .json({ success: false, error: err.response?.data || err.message });
   }
 });
 
@@ -148,4 +182,3 @@ if (stat.size > 100 * 1024 * 1024) {
 app.listen(PORT, () => {
   console.log(`🎧 REBEL Song-Detect API running on port ${PORT}`);
 });
-
