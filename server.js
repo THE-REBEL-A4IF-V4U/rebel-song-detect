@@ -95,14 +95,19 @@ app.post("/song-detect", upload.single("file"), async (req, res) => {
     else {
       return res.status(400).json({ success: false, error: "Upload a file or provide url in 'url' field." });
     }
+// File Size Safety
+const stat = fs.statSync(sourceFile);
+console.log("📏 File size:", stat.size, "bytes");
 
-    // File Size Safety
-    const stat = fs.statSync(sourceFile);
-    console.log("📏 File size:", stat.size, "bytes");
-    if (stat.size > 8 * 1024 * 1024) {
-      safeUnlink(tempFile);
-      return res.status(413).json({ success: false, error: "File too large (limit 8MB)" });
-    }
+// ✅ এখন 100MB limit
+if (stat.size > 100 * 1024 * 1024) {
+  safeUnlink(tempFile);
+  return res.status(413).json({
+    success: false,
+    error: "File too large (limit 100MB)"
+  });
+}
+
 
     // Convert to Base64
     const audioBase64 = fs.readFileSync(sourceFile, { encoding: "base64" });
@@ -143,3 +148,4 @@ app.post("/song-detect", upload.single("file"), async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🎧 REBEL Song-Detect API running on port ${PORT}`);
 });
+
