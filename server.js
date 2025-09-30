@@ -1,149 +1,76 @@
-// server.js
-// Song Detect API (Upload + URL) using Shazam API (Render-ready)
-
 const express = require("express");
-const multer = require("multer");
-const axios = require("axios");
-const fs = require("fs-extra");
-const cors = require("cors");
-const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
-const path = require("path");
-require("dotenv").config();
+const fetch = require("node-fetch");
+const archiver = require("archiver");
+const cheerio = require("cheerio");
+const sanitize = require("sanitize-filename");
+const { URL } = require("url");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const upload = multer({ dest: "uploads/" });
-
-// Middleware
-app.set("trust proxy", 1);
-app.use(rateLimit({ windowMs: 10 * 60 * 1000, max: 1000 }));
-app.use(helmet());
-app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, "public")));
 
-// Helper: Safe delete
-function safeUnlink(file) {
-  try { if (file && fs.existsSync(file)) fs.unlinkSync(file); } catch {}
+function resolveUrl(base, relative) {
+  try { return new URL(relative, base).href; }
+  catch { return null; }
 }
 
-// Key check
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
-if (!RAPIDAPI_KEY) {
-  console.warn("⚠️ RAPIDAPI_KEY not set in environment (.env on local or Render Environment Variables).");
+async function fetchBuffer(url) {
+  const res = await fetch(url, { headers: { "User-Agent": "SaveWeb2Zip/1.0" } });
+  if (!res.ok) throw new Error(res.statusText);
+  return await res.buffer();
 }
 
-// Health route
-app.get("/", (req, res) => {
-  res.send("✅ REBEL Song-Detect API is running!");
-});
+app.post("/save-proxy", async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).send("Missing url");
 
-// --- Song Detect API ---
-app.post("/song-detect", upload.single("file"), async (req, res) => {
-  let tempFile = null;
   try {
-    let sourceFile = null;
+    const pageResp = await fetch(url);
+    if (!pageResp.ok) return res.status(500).send("Failed to fetch page");
+    const html = await pageResp.text();
+    const baseUrl = pageResp.url;
 
-    // Case 1: File Upload
-    if (req.file) {
-      console.log("📂 File received:", req.file.originalname, req.file.size + " bytes", req.file.mimetype);
-      sourceFile = req.file.path;
+    const $ = cheerio.load(html);
+    const resources = [];
+    const added = new Set();
+
+    function addIf(resUrl, folder) {
+      if (!resUrl) return;
+      const abs = resolveUrl(baseUrl, resUrl);
+      if (!abs || added.has(abs)) return;
+      added.add(abs);
+      const filename = sanitize(new URL(abs).pathname.split("/").filter(Boolean).pop() || "file");
+      const pathInZip = `${folder}/${filename}`;
+      resources.push({ abs, pathInZip });
+      return pathInZip;
     }
 
-    // Case 2: URL Provided (YouTube only for demo)
-    else if (req.body.url) {
-      const mediaUrl = String(req.body.url || "").trim();
-      if (!mediaUrl) return res.status(400).json({ success: false, error: "Empty url" });
+    $("img").each((i, el) => addIf($(el).attr("src"), "images"));
+    $("link[rel=stylesheet]").each((i, el) => addIf($(el).attr("href"), "css"));
+    $("script[src]").each((i, el) => addIf($(el).attr("src"), "js"));
 
-      console.log("🌍 URL received:", mediaUrl);
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="page.zip"`);
 
-      // For YouTube use external API
-      let mediaResp;
-      if (mediaUrl.includes("youtube.com") || mediaUrl.includes("youtu.be")) {
-        mediaResp = await axios.get("https://nayan-video-downloader.vercel.app/ytdown", {
-          params: { url: mediaUrl }
-        });
-      } else {
-        return res.status(400).json({ success: false, error: "Only YouTube supported right now" });
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.pipe(res);
+
+    archive.append(html, { name: "index.html" });
+
+    for (const r of resources) {
+      try {
+        const buf = await fetchBuffer(r.abs);
+        archive.append(buf, { name: r.pathInZip });
+      } catch (e) {
+        console.warn("Skip resource", r.abs);
       }
-
-      const md = mediaResp.data;
-      console.log("🔗 MediaResp keys:", Object.keys(md));
-
-      const downloadUrl =
-        md?.data?.audio || md?.data?.video || md?.data?.url ||
-        md?.result?.audio || md?.result?.video || md?.result?.url || null;
-
-      if (!downloadUrl) {
-        return res.status(404).json({ success: false, error: "No downloadable audio/video found" });
-      }
-
-      console.log("⬇️ Downloading from:", downloadUrl);
-
-      const uploadDir = path.join(__dirname, "uploads");
-      fs.ensureDirSync(uploadDir);
-
-      tempFile = path.join(uploadDir, `song_${Date.now()}.mp3`);
-      const resp = await axios.get(downloadUrl, { responseType: "arraybuffer", timeout: 60_000 });
-      fs.writeFileSync(tempFile, Buffer.from(resp.data));
-      sourceFile = tempFile;
     }
 
-    // Nothing provided
-    else {
-      return res.status(400).json({ success: false, error: "Upload a file or provide url in 'url' field." });
-    }
+    await archive.finalize();
 
-    // File Size Safety
-    const stat = fs.statSync(sourceFile);
-    console.log("📏 File size:", stat.size, "bytes");
-
-    if (stat.size > 100 * 1024 * 1024) { // 100MB limit
-      safeUnlink(tempFile);
-      return res.status(413).json({
-        success: false,
-        error: "File too large (limit 100MB)"
-      });
-    }
-
-    // Convert to Base64
-    const audioBase64 = fs.readFileSync(sourceFile, { encoding: "base64" });
-    console.log("🎵 File converted to base64, length:", audioBase64.length);
-
-    // RAPIDAPI check
-    if (!RAPIDAPI_KEY) {
-      safeUnlink(tempFile);
-      return res.status(500).json({ success: false, error: "RAPIDAPI_KEY not configured" });
-    }
-
-    // Call Shazam API (your subscribed endpoint)
-    console.log("🚀 Sending to Shazam API...");
-    const shazamResp = await axios.request({
-      method: "POST",
-      url: "https://shazam.p.rapidapi.com/songs/detect",
-      headers: {
-        "content-type": "application/json",
-        "X-RapidAPI-Key": RAPIDAPI_KEY,
-        "X-RapidAPI-Host": "shazam.p.rapidapi.com"
-      },
-      data: { audio: audioBase64 },
-      timeout: 60_000
-    });
-
-    safeUnlink(tempFile);
-    console.log("✅ Song detected successfully!");
-
-    return res.json({ success: true, detected: shazamResp.data });
   } catch (err) {
-    safeUnlink(tempFile);
-    console.error("❌ Song detect error:", err.response?.data || err.message);
-    return res.status(500).json({ success: false, error: err.response?.data || err.message });
+    console.error("Proxy error:", err.message);
+    res.status(500).send("Server error: " + err.message);
   }
 });
 
-// Start
-app.listen(PORT, () => {
-  console.log(`🎧 REBEL Song-Detect API running on port ${PORT}`);
-});
+app.listen(4000, () => console.log("✅ Proxy server running on http://localhost:4000/save-proxy"));
